@@ -1,0 +1,1093 @@
+######################################################################################################
+#                                    PHEMlight: Advanced Mode 5
+######################################################################################################
+rm(list=ls())
+
+library(readr)
+library(sf)
+library(plyr)
+library(dplyr)
+library(data.table)
+library(units)
+#library(PHEMLight)
+
+# Configuration Data ------------------------------------------------------
+imput_path <- "/scratch/PHEMlight_R/Bilbao/"
+file_roads <- "/scratch/PHEMlight_R/Bilbao/geom/gksection.shp"
+drive_cycle_data <- "bilbao.csv"
+output_path <- imput_path
+file_resuspension_ef <- "/scratch/resuspension_EF.csv"
+file_flows <- "flow_tot.csv"
+path_vehicles <- "/home/Earth/drodrig1/Documents/Doctorado/PHEMlight/Full_Version/Default Vehicles/V4_no_elect/"
+fleetShare_data <- "/home/Earth/drodrig1/Documents/Doctorado/PHEMlight/Full_Version/Default Vehicles/V4_no_elect/FleetShares.csv"
+
+non_exhaust <- F
+hourly <- F
+ta = 10 #Temp. Ambiente
+ltrip <- 6.47 # Average distance in Barcelona [km] (obs. mobilitat 2013)
+
+#--
+tunning_idle <- 1.1 # No tocar (!!)
+tunning_critP <- 1.15 # No tocar (!!)
+tunning_VSP <-0.9 # No tocar (!!)
+# End configuration data #
+
+
+
+setwd(imput_path)
+
+# Functions ---------------------------------------------------------------
+read_csv_emissions <- function(filename){
+  ret <- read.csv(paste0(path_vehicles,filename), skip = 3, col.names = header)
+  ret$Source <- as.factor(filename)
+  ret
+}
+read_veh_data <- function(filename){
+  ret <- read.csv(paste0(path_vehicles,filename), sep = ",", header = F, colClasses = "character")
+  #ret$Source <- as.factor(filename)
+  ret
+}
+def_header <- function (file_path) {
+  x <- read.csv(file_path)
+  header<-colnames(x)
+  return(header)
+}
+read_critical_power <- function(crit_Pname) {
+  crit_P <- read.csv(paste0(path_vehicles,crit_Pname), skip = 2, nrows = 1, sep = ",", header = F)
+  crit_P <- as.numeric(regmatches(crit_P[1,1], regexpr("[[:digit:].[:digit:]]+", crit_P[1,1])))
+  crit_P<- data.frame(crit_P)
+  crit_P$source<- crit_Pname
+  return(crit_P)
+}
+read_idle<- function(file_emis){
+  idle <- read.csv(paste0(path_vehicles,file_emis), skip = 3, nrows = 1, sep = ",", header = F)
+  names(idle)<- c("x", "NOx_idle", "HC_idle", "CO_idle", "PM_idle", "PN_idle", "NO_idle")
+  idle[1] <- NULL
+  idle$source <- file_emis
+  return(idle)
+}
+calc_idles <- function(idle, fleetshare) {
+  idle$source <- sub(".csv", "", idle$source)
+  idle <- left_join(idle, fleetshare, by = c("source" = "veh_category"))
+  idle<- transform(idle, NOx_idle = NOx_idle*share,
+                   HC_idle = HC_idle*share,
+                   CO_idle = CO_idle*share,
+                   PM_idle = PM_idle*share,
+                   PN_idle = PN_idle*share,
+                   NO_idle = NO_idle*share)
+  idle <- ddply(idle, ~veh_group, summarise, NOx_idle = sum(NOx_idle),
+                HC_idle = sum(HC_idle),
+                CO_idle = sum(CO_idle),
+                PM_idle = sum(PM_idle),
+                PN_idle = sum(PN_idle),
+                NO_idle = sum(NO_idle))
+  idle <- idle[-4,]
+  idle[1,2:7] <- idle[1,2:7]*avg_critic_P[1,2] # Denormalise idle for BUS
+  idle[2,2:7] <- idle[2,2:7]*avg_critic_P[2,2] # Denormalise idle HDV
+  return(idle)
+}
+create_PC_list <- function() {
+  share_PC <- filter(fleetshare, veh_group == "PC")
+  PC_list <- share_PC[2]
+  PC_phemlight<- paste0(PC_list$veh_category, ".PHEMLight.veh")
+  return(PC_phemlight)
+}
+create_bus_list <- function() {
+  share_BUS<- filter(fleetshare, veh_group == "BUS")
+  BUS_list <- share_BUS[2]
+  BUS_phemlight<- paste0(BUS_list$veh_category, ".PHEMLight.veh")
+  return(BUS_phemlight)
+}
+create_HDV_list <- function() {
+  share_HDV<- filter(fleetshare, veh_group == "HDV")
+  HDV_list <- share_HDV[2]
+  HDV_phemlight<- paste0(HDV_list$veh_category, ".PHEMLight.veh")
+  return(HDV_phemlight)
+}
+read_rot_mas_factor <- function(files_corrected) {
+  rot_mass_factor <- read.csv(paste0(path_vehicles,files_corrected), sep = ",", skip = 109, nrows = 7)
+  rot_mass_factor$source<- files_corrected
+  return(rot_mass_factor)
+}
+read_rot_mas_factor_COTTRT <- function(files_corrected) {
+  rot_mass_factor <- read.csv(paste0(path_vehicles,files_corrected), sep = ",", skip = 109, nrows = 14)
+  rot_mass_factor$source<- files_corrected
+  return(rot_mass_factor)
+}
+read_rot_mas_factor_RT_II<- function(files_corrected) {
+  rot_mass_factor <- read.csv(paste0(path_vehicles,files_corrected), sep = ",", skip = 109, nrows = 12)
+  rot_mass_factor$source<- files_corrected
+  return(rot_mass_factor)
+}
+data_rot_mass_factor <- function(veh_files) {
+  files_corrected <- veh_files[!grepl("CO|TT|RT", veh_files)]
+  files_CO_RT_TT <- veh_files[grepl("CO|TT|RT", veh_files)]
+  files_CO_RT_TT <- files_CO_RT_TT[!grepl("RT_II", files_CO_RT_TT)]
+  files_RT_II<- veh_files[grepl("RT_II", veh_files)]
+  rot_mass_factors_normal<- ldply(files_corrected, read_rot_mas_factor)
+  rot_mass_factors_CORTTT<- ldply(files_CO_RT_TT, read_rot_mas_factor_COTTRT)
+  rot_mass_factors_RT_II<- ldply(files_RT_II, read_rot_mas_factor_RT_II)
+  rot_mass_factors<- rbind(rot_mass_factors_normal, rot_mass_factors_CORTTT, rot_mass_factors_RT_II)
+  return(rot_mass_factors)
+}
+calc_rot_mass_factor<- function(veh_class, v){
+  rot_mass_factor_wanted<- filter(rot_mass_factors1, source == veh_class)
+  rot_mass_factor_wanted<- data.frame(approx(x = rot_mass_factor_wanted$`speed_m/s`, y = rot_mass_factor_wanted$rot_mass_factor, xout = v))
+  return(rot_mass_factor_wanted$y)
+}
+join_veh_variables <- function(vehicle_data, fleetshares) {
+  mveh<- laply(files_vehicles, function(x) {as.integer(vehicle_data[[x]][[1]][5])})
+  mload <- laply(files_vehicles, function(x) {as.integer(vehicle_data[[x]][[1]][7])})
+  Fr0 <- laply(files_vehicles, function(x) {as.numeric(vehicle_data[[x]][[1]][32])})
+  Fr1 <- laply(files_vehicles, function(x) {as.numeric(vehicle_data[[x]][[1]][34])})
+  Fr4 <- laply(files_vehicles, function(x) {as.numeric(vehicle_data[[x]][[1]][40])})
+  Cd <- laply(files_vehicles, function(x) {as.numeric(vehicle_data[[x]][[1]][9])})
+  A <- laply(files_vehicles, function(x) {as.numeric(vehicle_data[[x]][[1]][11])})
+  mrot <- laply(files_vehicles, function(x) {as.numeric(vehicle_data[[x]][[1]][17])})
+  veh_specifics<-data.frame(cbind(source = files_vehicles, mveh, mload, Fr0, Fr1, Fr4, Cd, A, mrot), row.names = files_vehicles)
+  veh_specifics$source <- sub(".PHEMLight.veh", "", veh_specifics$source)
+  names(fleetshares)[2] <- "source"
+  veh_specifics<- join_all(list(veh_specifics,fleetshares), by='source', type='left')
+  veh_specifics[,2:9] <- as.numeric(as.character(unlist(veh_specifics[,2:9])))
+  return(veh_specifics)
+}
+calc_sum_specific_var <- function(vehicles_data, fleetshares) {
+  veh_specific_var <- join_veh_variables(vehicles_data, fleetshares)
+  avg_veh_specific_var <- veh_specific_var[,c(1,10)]
+  avg_veh_specific_var[,3:10]<- veh_specific_var[,2:9]*veh_specific_var$share
+  sum_veh_specific_var <- ddply(avg_veh_specific_var, ~veh_group, summarise,
+                                smveh = sum(mveh, na.rm = T),
+                                smload = sum(mload, na.rm = T),
+                                sFr0 = sum(Fr0, na.rm = T),
+                                sFr1 = sum(Fr1, na.rm = T),
+                                sFr4 = sum(Fr4, na.rm = T),
+                                sCd = sum(Cd, na.rm = T),
+                                sA = sum(A, na.rm = T),
+                                smrot = sum(mrot, na.rm = T))
+  sum_veh_specific_var <- sum_veh_specific_var[-4,]
+  return(sum_veh_specific_var)
+}
+calc_power_PC <- function(v, a, rot_mass, grad = 0) {
+  # Veh specific data
+  g <- 9.81
+  sigma <- 1.225 # Air density
+  PC_vars <- sum_veh_specific_var[3, 2:9]
+  rot_mass_number<- rot_mass #calc_rot_mass_factor(max_car, v)
+  # Power resistances to overcome
+  Proll <- (PC_vars$smveh + PC_vars$smload) * g * (PC_vars$sFr0 + PC_vars$sFr1*v + PC_vars$sFr4*v**4)*v
+  Pair<- PC_vars$sCd*PC_vars$sA*(sigma/2)*v**3
+  Pacc<- (PC_vars$smveh*rot_mass_number+PC_vars$smload+PC_vars$smrot)*a*v
+  Prgrad <- (PC_vars$smveh+PC_vars$smload)*grad*0.01*v
+  ngear<- 0.9
+  # Final engine power
+  Pe <- (Proll + Pair + Pacc + Prgrad)/ngear
+  Pe<- Pe/1000
+  return(Pe)
+}
+calc_power_BUS <- function(v, a, grad = 0) {
+  # Veh specific data
+  g <- 9.81
+  sigma <- 1.225 # Air density
+  BUS_vars <- sum_veh_specific_var[1, 2:9]
+  rot_mass_number<- rot_mass_factors[1,2]
+  # Power resistances to overcome
+  Proll <- (BUS_vars$smveh + BUS_vars$smload) * g * (BUS_vars$sFr0 + BUS_vars$sFr1*v + BUS_vars$sFr4*v**4)*v
+  Pair<- BUS_vars$sCd*BUS_vars$sA*(sigma/2)*v**3
+  Pacc<- (BUS_vars$smveh*rot_mass_number+BUS_vars$smload+BUS_vars$smrot)*a*v
+  Prgrad <- (BUS_vars$smveh+BUS_vars$smload)*grad*0.01*v
+  ngear<- 0.8
+  # Final engine power
+  Pe <- (Proll + Pair + Pacc + Prgrad)/ngear
+  Pe<- Pe/1000
+  return(Pe)
+}
+calc_power_HDV <- function(v, a, grad = 0) {
+  # Veh specific data
+  g <- 9.81
+  sigma <- 1.225 # Air density
+  HDV_vars <- sum_veh_specific_var[2, 2:9]
+  rot_mass_number<- rot_mass_factors[2,2]  #calc_rot_mass_factor(max_hdv, v)
+  # Power resistances to overcome
+  Proll <- (HDV_vars$smveh + HDV_vars$smload) * g * (HDV_vars$sFr0 + HDV_vars$sFr1*v + HDV_vars$sFr4*v**4)*v
+  Pair<- HDV_vars$sCd*HDV_vars$sA*(sigma/2)*v**3
+  Pacc<- (HDV_vars$smveh*rot_mass_number+HDV_vars$smload+HDV_vars$smrot)*a*v
+  Prgrad <- (HDV_vars$smveh+HDV_vars$smload)*grad*0.01*v
+  ngear<- 0.9
+  # Final engine power
+  Pe <- (Proll + Pair + Pacc + Prgrad)/ngear
+  Pe<- Pe/1000
+  return(Pe)
+}
+final_power<- function(drive_cycles){
+  if (drive_cycles$Vehicle_type == "Car"){
+    drive_cycles$power <- calc_power_PC(drive_cycles$Av_link_speed, drive_cycles$acc)
+    return(drive_cycles$power)
+  } else if (drive_cycles$Vehicle_type == "Bus") {
+    drive_cycles$power <- calc_power_BUS(drive_cycles$Av_link_speed, drive_cycles$acc)
+    return(drive_cycles$power)
+  } else if (drive_cycles$Vehicle_type == "HDV") {
+    drive_cycles$power <- calc_power_HDV(drive_cycles$Av_link_speed, drive_cycles$acc)
+    return(drive_cycles$power)
+  }
+}
+approx_vsp<- function(drive_cycles_vsp, Veh_group) {
+  selection<- filter(drive_cycles_vsp, Vehicle_type == Veh_group)
+  if (Veh_group == "Car") {
+    NOx <- data.frame(approx(x = P_PC$cp_norm.rated., y = P_PC$NOx_normalised, xout = selection$norm_VSP, rule = 2))
+    HC <- data.frame(approx(x = P_PC$cp_norm.rated., y = P_PC$HC_normalised, xout = selection$norm_VSP, rule = 2))
+    CO <- data.frame(approx(x = P_PC$cp_norm.rated., y = P_PC$CO_normalised, xout = selection$norm_VSP, rule = 2))
+    PM <- data.frame(approx(x = P_PC$cp_norm.rated., y = P_PC$PM_normalised, xout = selection$norm_VSP, rule = 2))
+    PN <- data.frame(approx(x = P_PC$cp_norm.rated., y = P_PC$PN_normalised, xout = selection$norm_VSP, rule = 2))
+    NO <- data.frame(approx(x = P_PC$cp_norm.rated., y = P_PC$NO_normalised, xout = selection$norm_VSP, rule = 2))
+    x <- data.frame(cbind(NOx$y, HC$y, CO$y, PM$y, PN$y, NO$y))
+
+  } else if (Veh_group == "Bus") {
+    NOx <- data.frame(approx(x = P_BUS$cp_norm.rated., y = P_BUS$NOx_normalised, xout = selection$norm_VSP, rule = 2))
+    HC <- data.frame(approx(x = P_BUS$cp_norm.rated., y = P_BUS$HC_normalised, xout = selection$norm_VSP, rule = 2))
+    CO <- data.frame(approx(x = P_BUS$cp_norm.rated., y = P_BUS$CO_normalised, xout = selection$norm_VSP, rule = 2))
+    PM <- data.frame(approx(x = P_BUS$cp_norm.rated., y = P_BUS$PM_normalised, xout = selection$norm_VSP, rule = 2))
+    PN <- data.frame(approx(x = P_BUS$cp_norm.rated., y = P_BUS$PN_normalised, xout = selection$norm_VSP, rule = 2))
+    NO <- data.frame(approx(x = P_BUS$cp_norm.rated., y = P_BUS$NO_normalised, xout = selection$norm_VSP, rule = 2))
+    x <- data.frame(cbind(NOx$y, HC$y, CO$y, PM$y, PN$y, NO$y))
+
+  } else if (Veh_group == "HDV") {
+    NOx <- data.frame(approx(x = P_HDV$cp_norm.rated., y = P_HDV$NOx_normalised, xout = selection$norm_VSP, rule = 2))
+    HC <- data.frame(approx(x = P_HDV$cp_norm.rated., y = P_HDV$HC_normalised, xout = selection$norm_VSP, rule = 2))
+    CO <- data.frame(approx(x = P_HDV$cp_norm.rated., y = P_HDV$CO_normalised, xout = selection$norm_VSP, rule = 2))
+    PM <- data.frame(approx(x = P_HDV$cp_norm.rated., y = P_HDV$PM_normalised, xout = selection$norm_VSP, rule = 2))
+    PN <- data.frame(approx(x = P_HDV$cp_norm.rated., y = P_HDV$PN_normalised, xout = selection$norm_VSP, rule = 2))
+    NO <- data.frame(approx(x = P_HDV$cp_norm.rated., y = P_HDV$NO_normalised, xout = selection$norm_VSP, rule = 2))
+    x <- data.frame(cbind(NOx$y, HC$y, CO$y, PM$y, PN$y, NO$y))
+    }
+  return(x)
+}
+calc_Decel_coast_BUS <- function(v, grad = 0) {
+  # Veh specific data
+  g <- 9.81
+  sigma <- 1.225 # Air density
+  BUS_vars <- sum_veh_specific_var[3, 2:9]
+  rot_mass_number<- rot_mass_factors[1,2] #calc_rot_mass_factor(max_bus, v)
+  # Power resistances to overcome
+  Proll <- (BUS_vars$smveh + BUS_vars$smload) * g * (BUS_vars$sFr0 + BUS_vars$sFr1*v + BUS_vars$sFr4*v**4)*v
+  Pair<- BUS_vars$sCd*BUS_vars$sA*(sigma/2)*v**3
+  denom <- BUS_vars$smveh*rot_mass_number+BUS_vars$smload+BUS_vars$smrot
+  Prgrad <- (BUS_vars$smveh+BUS_vars$smload)*grad*0.01*v
+  Floss <- 0.1*Proll
+  # Deceleration Coasting
+  Decel_coast <- -(Proll + Pair + Prgrad + Floss)/denom
+  return(Decel_coast)
+}
+
+# Non-exhaust
+  # Cold - Start
+f_minone <- function(thelist) {
+  for (i in (1:nrow(thelist))) {
+    if (thelist$NOx[i] < 1) {
+      thelist$NOx[i] = 1
+    }
+    if (thelist$HC[i] < 1){
+      thelist$HC[i] = 1
+    }
+    if (length(thelist$PM) > 0) {
+      if (thelist$PM[i] < 1){
+        thelist$PM[i] = 1
+      }
+    }
+  }
+  return(thelist)
+}
+calc_Cold_Hot_P<- function(emissions) {
+  A<- NULL; B<- NULL; C<- NULL
+  for (i in (1:nrow(emissions))) {
+    if (emissions$link_speed_av[i] >= 5 & emissions$link_speed_av[i] <= 25) {
+      A[i]<- 0.0458; B[i] <- 0.00747; C[i] <- 0.764
+    } else if (emissions$link_speed_av[i] > 25 & emissions$link_speed_av[i] <= 45) {
+      A[i]<- 0.0484; B[i] <- 0.0228; C[i] <- 0.685
+    } else {
+      A[i] <- 0; B[i] <- 0; C[i] <- 1
+    }
+  }
+  eCold_Hot_P <- data.frame(NOx = A*emissions$link_speed_av + B*ta + C)
+  rm(A, B, C)
+  A<- NULL; B<- NULL; C<- NULL
+  for (i in (1:nrow(emissions))) {
+    if (emissions$link_speed_av[i] >= 5 & emissions$link_speed_av[i] <= 45) {
+      A[i]<- 0.0476; B[i] <- -0.477; C[i] <- 13.44
+    } else {
+      A[i] <- 0; B[i] <- 0; C[i] <- 1
+    }
+  }
+  eCold_Hot_P$HC <- A*emissions$link_speed_av + B*ta + C
+  rm(A, B, C)
+  eCold_Hot_P <- f_minone(eCold_Hot_P) # If Ecold/Ehot < 1; 1 should be used (p.60)
+  eCold_Hot_P <- eCold_Hot_P -1  # (eCold / eHot - 1)
+  return(eCold_Hot_P)
+}
+calc_Cold_Hot_D <- function(){
+  eCold_Hot_D <- data.frame(NOx = 1.3-0.013*ta, HC= 3.1-0.09*ta, PM = 3.1-0.1*ta) #table 3.41
+  # eCold_Hot_D <- f_minone(eCold_Hot_D) En diesel no pone esa nota
+  eCold_Hot_D <- eCold_Hot_D - 1 # (eCold / eHot - 1)
+  return(eCold_Hot_D)
+}
+calc_cold_start<- function(eCold_Hot_P, eCold_Hot_D, emissions) {
+  eCold_hot_D_G <- data.frame(NOx = gasoline * eCold_Hot_P$NOx + diesel*eCold_Hot_D$NOx)
+  eCold_hot_D_G$HC <- (gasoline * eCold_Hot_P$HC + diesel*eCold_Hot_D$HC)
+  eCold_hot_D_G$PM <- diesel*eCold_Hot_D$PM # Petrol doesn't emit PM cold start
+
+  cold_start<- data.frame(beta, M, eHot_HC, eHot_NOx, eHot_PM, eCold_hot_D_G$NOx, eCold_hot_D_G$HC, eCold_hot_D_G$PM)
+  cold_start <- transmute(cold_start,
+                       NOx_cold = beta * M * eHot_NOx * eCold_hot_D_G.NOx,
+                       HC_cold = beta * M * eHot_HC * eCold_hot_D_G.HC,
+                       PM_cold = beta * M * eHot_PM * eCold_hot_D_G.PM)
+
+  cold_start <- cbind(emissions$LinkID, emissions$Hr, emissions$veh_group, cold_start)
+  names(cold_start)[1:3]<- c("LinkID", "Hr", "veh_group")
+  return(cold_start)
+}
+
+  # Resuspension
+weight_LDV <- function(sharefile) {
+  LDV<-  dplyr::filter(sharefile, grepl("LCV",vehicle_class))
+  LDV<- sum(LDV$share)
+}
+weight_PC <- function(sharefile) {
+  PC<-  dplyr::filter(sharefile, grepl("PC",vehicle_class))
+  PC<- sum(PC$share)
+}
+ef_calc <- function(file_emissions, ef_constants){
+  for (i in (1:nrow(file_emissions))) {
+    if (file_emissions$veh_group[i] == "car"){
+      ef[i] <- ef_constants[1,2]*PC + ef_constants[5,2]*LDV
+    } else if (file_emissions$veh_group[i] == "bus" | file_emissions$veh_group[i] == "hdv") {
+      ef[i] <- ef_constants[2,2]
+    } else if (file_emissions$veh_group[i] == "motos"){
+      ef[i] <- ef_constants[4,2]
+    } else {ef[i] <- NA
+    }
+  }
+  return(ef)
+}
+calc_resuspension <- function(file_emissions) {
+  Eres<- as.vector(N * M * ef)
+  resuspension <- data.frame(cbind(file_emissions$LinkID, file_emissions$Hr, file_emissions$veh_group, Eres))
+  names(resuspension)[1:3] <- c("LinkID", "Hr", "veh_group")
+  resuspension[1] <- as.integer(as.character(resuspension$LinkID))
+  resuspension[2] <- as.integer(as.character(resuspension$Hr))
+  resuspension[4] <- as.numeric(as.character(resuspension$Eres))
+  return(resuspension)
+}
+
+  # Wear
+calc_tyre_wear <- function(final_t_wear) {
+  if (final_t_wear$veh_group == "moto") {
+    final_t_wear$Te_Tyre <- final_t_wear$Te_Tyre*final_t_wear$t_motos
+    return(final_t_wear$Te_Tyre)
+  } else if (final_t_wear$veh_group == "bus" | final_t_wear$veh_group == "hdv" ) {
+    final_t_wear$Te_Tyre <- final_t_wear$Te_Tyre*final_t_wear$tHDV
+    return(final_t_wear$Te_Tyre)
+  } else {
+    final_t_wear$Te_Tyre <- final_t_wear$Te_Tyre*final_t_wear$tPC_LDV
+    return(final_t_wear$Te_Tyre)
+  }
+}
+calc_break_wear <- function(final_b_wear) {
+  if (final_b_wear$veh_group == "moto") {
+    final_b_wear$Te_Break <- final_b_wear$Te_Break*final_b_wear$b_motos
+  } else if (final_b_wear$veh_group == "bus" | final_b_wear$veh_group == "hdv" ) {
+    final_b_wear$Te_Break <- final_b_wear$Te_Break*final_b_wear$bHDV
+  } else {
+    final_b_wear$Te_Break <- final_b_wear$Te_Break*final_b_wear$bPC_LDV
+  }
+}
+calc_surface_wear <- function(final_s_wear){
+  if (final_s_wear$veh_group == "moto") {
+    final_s_wear$Te_surface <- final_s_wear$Te_surface*final_s_wear$s_motos
+  } else if (final_s_wear$veh_group == "bus" | final_s_wear$veh_group == "hdv" ) {
+    final_s_wear$Te_surface <- final_s_wear$Te_surface*final_s_wear$sHDV
+  } else {
+    final_s_wear$Te_surface <- final_s_wear$Te_surface*final_s_wear$sPC_LDV
+  }
+}
+
+# No usadas
+dec_coast_final<- function(drive_cycles){
+  if (drive_cycles$Vehicle_type == "Car"){
+    drive_cycles$decel_coast <- calc_Decel_coast_PC(drive_cycles$Av_link_speed)
+    return(drive_cycles$decel_coast)
+  } else if (drive_cycles$Vehicle_type == "Bus") {
+    drive_cycles$decel_coast <- calc_Decel_coast_BUS(drive_cycles$Av_link_speed)
+    return(drive_cycles$decel_coast)
+  } else if (drive_cycles$Vehicle_type == "HDV") {
+    drive_cycles$decel_coast <- calc_Decel_coast_HDV(drive_cycles$Av_link_speed)
+    return(drive_cycles$decel_coast)
+  }
+}
+calc_Decel_coast_PC <- function(v, grad = 0) {
+  # Veh specific data
+  g <- 9.81
+  sigma <- 1.225 # Air density
+  PC_vars <- sum_veh_specific_var[3, 2:9]
+  rot_mass_number<- rot_mass_factors[3,2] #calc_rot_mass_factor(max_car, v)
+  # Power resistances to overcome
+  Proll <- (PC_vars$smveh + PC_vars$smload) * g * (PC_vars$sFr0 + PC_vars$sFr1*v + PC_vars$sFr4*v**4)*v
+  Pair<- PC_vars$sCd*PC_vars$sA*(sigma/2)*v**3
+  denom <- PC_vars$smveh*rot_mass_number+PC_vars$smload+PC_vars$smrot
+  Prgrad <- (PC_vars$smveh+PC_vars$smload)*grad*0.01*v
+  Floss <- 0  # 0.1*Proll
+  # Deceleration Coasting
+  Decel_coast <- -(Proll + Pair + Prgrad + Floss)/denom
+  return(Decel_coast)
+}
+calc_Decel_coast_HDV <- function(v, grad = 0) {
+  # Veh specific data
+  g <- 9.81
+  sigma <- 1.225 # Air density
+  HDV_vars <- sum_veh_specific_var[3, 2:9]
+  rot_mass_number<- rot_mass_factors[2,2]# calc_rot_mass_factor(max_hdv, v) ## ¡¡ TE QUEDA ESTO !!
+  # Power resistances to overcome
+  Proll <- (HDV_vars$smveh + HDV_vars$smload) * g * (HDV_vars$sFr0 + HDV_vars$sFr1*v + HDV_vars$sFr4*v**4)*v
+  Pair<- HDV_vars$sCd*HDV_vars$sA*(sigma/2)*v**3
+  denom <- HDV_vars$smveh*rot_mass_number+HDV_vars$smload+HDV_vars$smrot
+  Prgrad <- (HDV_vars$smveh+HDV_vars$smload)*grad*0.01*v
+  Floss <- 0.1*Proll
+  # Deceleration Coasting
+  Decel_coast <- -(Proll + Pair + Prgrad + Floss)/denom
+  return(Decel_coast)
+}
+
+
+############### ============== EMISSION FACTORS ============== ###############
+
+roads <- sf::read_sf(file_roads)
+roads <- subset(roads, select = c("id", "name"))
+
+## Lists of files needed ##
+files_emissions <- list.files(path_vehicles)
+files_emissions <- files_emissions[!grepl("*FC.csv|*.veh|^Fleet", files_emissions)]
+header<- def_header(paste0(path_vehicles, files_emissions[1]))
+tot_emissions_EF <- ldply(files_emissions, read_csv_emissions)
+
+## Drive cyle data ##
+drive_cycles_ss <- read_csv(drive_cycle_data)
+drive_cycles_ss$Av_link_speed <- drive_cycles_ss$Av_link_speed/3.6 # To m/s
+drive_cycles_ss$Vehicle_type<- as.factor(drive_cycles_ss$Vehicle_type)
+drive_cycles_ss <- arrange(drive_cycles_ss, LinkID, Vehicle_type)
+drive_cycles_ss <- mutate(drive_cycles_ss, acc = ifelse(lead(Time) - Time != 1, 0, lead(Av_link_speed) - Av_link_speed)) # Acceleration, when time gap between vehicles, acc = 0
+
+# drive_cycles_ss <- drive_cycles_ss[seq(1, nrow(drive_cycles_ss), 10), ]
+# drive_cycles_ss <- mutate(drive_cycles_ss, acc = (lead(Av_link_speed) - Av_link_speed)/10) # Acceleration, when time gap between vehicles, acc = 0
+
+
+## Fleetshares ##
+fleetshare<- read.csv(fleetShare_data, skip = 2, col.names = c("veh_group", "veh_category", "share"))
+
+## Vehicle Data ##
+files_vehicles <- list.files(path_vehicles)
+files_vehicles <- files_vehicles[grepl("*.veh", files_vehicles)]
+tot_vehicles_data <- llply(files_vehicles, read_veh_data)
+names(tot_vehicles_data)<- c(files_vehicles)
+
+## Prated/Pcritical
+veh_critial_power<- ldply(files_emissions, read_critical_power)
+veh_critial_power$source <- sub(".csv", "", veh_critial_power$source)
+criticP_share<- left_join(veh_critial_power, fleetshare, by = c("source" = "veh_category"))
+criticP_share$avg_crit_P <- criticP_share$crit_P*criticP_share$share
+avg_critic_P<- ddply(criticP_share, ~veh_group, summarise, sum_avg_critP = sum(avg_crit_P))
+avg_critic_P[c(1,2), 2] <- avg_critic_P[c(1,2), 2]*tunning_critP # Desfase de Pcrit respecto a la original
+
+
+## Idle
+idle <- ldply(files_emissions, read_idle)
+idle <- calc_idles(idle, fleetshare)
+idle[1,2:7] <- idle[1,2:7]*tunning_idle #Desfase de idle respecto al original
+
+
+## Power and pollutnat product with fleet shares ###
+tot_emissions_EF$Source <- sub(".csv", "", tot_emissions_EF$Source)
+tot_emissions_EF <- left_join(tot_emissions_EF, fleetshare, by = c("Source" = "veh_category"))
+tot_emissions_EF <- transform(tot_emissions_EF,
+                             NOx = NOx*share,
+                             HC = HC*share,
+                             CO = CO*share,
+                             PM = PM*share,
+                             PN = PN*share,
+                             NO = NO*share)
+
+## PC, Bus and HDV .veh lists
+PC_phemlight <- create_PC_list()
+BUS_phemlight <- create_bus_list()
+HDV_phemlight <- create_HDV_list()
+
+## Average Real Power - Pollutant per vehicle group
+P_PC <- ddply(filter(tot_emissions_EF, veh_group == "PC"), ~cp_norm.rated., summarise,
+              NOx_normalised = sum(NOx),
+              HC_normalised = sum(HC),
+              CO_normalised = sum(CO),
+              PM_normalised = sum(PM),
+              PN_normalised = sum(PN),
+              NO_normalised = sum(NO))
+P_BUS <- ddply(filter(tot_emissions_EF, veh_group == "BUS"), ~cp_norm.rated., summarise,
+               NOx_normalised = sum(NOx),
+               HC_normalised = sum(HC),
+               CO_normalised = sum(CO),
+               PM_normalised = sum(PM),
+               PN_normalised = sum(PN),
+               NO_normalised = sum(NO))
+P_HDV <- ddply(filter(tot_emissions_EF, veh_group == "HDV"), ~cp_norm.rated., summarise,
+               NOx_normalised = sum(NOx),
+               HC_normalised = sum(HC),
+               CO_normalised = sum(CO),
+               PM_normalised = sum(PM),
+               PN_normalised = sum(PN),
+               NO_normalised = sum(NO))
+
+# Desnormalizamos pollutants EF para Bus y HDV (que esta normalizado)
+P_BUS[,2:7] <- P_BUS[,2:7]*avg_critic_P[1,2]
+P_HDV[,2:7] <- P_HDV[,2:7]*avg_critic_P[2,2]
+
+
+############### ============== VSP FROM DRIVE CYCLES (normalised) ============== ###############
+
+# Lectura de todos los RMF
+rot_mass_factors<- ldply(files_vehicles, data_rot_mass_factor)
+names(rot_mass_factors)<- c("speed_m/s", "gear_ratio", "rot_mass_factor", "source")
+rot_mass_factors$`speed_m/s`<- rot_mass_factors$`speed_m/s`/3.6
+
+# Rot Mass factor optimisation
+#1
+rot_mass_factors1<- rot_mass_factors
+rot_mass_factors1$source <- sub(".PHEMLight.veh", "", rot_mass_factors1$source)
+rot_mass_factors1 <- left_join(rot_mass_factors1, fleetshare, by = c("source" = "veh_category"))
+rot_mass_factors1 <- as.data.table(rot_mass_factors1)
+max_rot_share<- rot_mass_factors1[rot_mass_factors1[, .I[which.max(share)], by=veh_group]$V1]
+max_car<- as.character(filter(max_rot_share, veh_group == "PC") %>% select(source))
+max_bus<- as.character(filter(max_rot_share, veh_group == "BUS") %>% select(source))
+max_hdv<- as.character(filter(max_rot_share, veh_group == "HDV") %>% select(source))
+#2
+rot_mass_factors$source <- sub(".PHEMLight.veh", "", rot_mass_factors$source)
+rot_mass_factors <- left_join(rot_mass_factors, fleetshare, by = c("source" = "veh_category"))
+rot_mass_factors <- ddply(rot_mass_factors, ~source, summarise, avg_rot_mass = mean(rot_mass_factor), share = unique(share), veh_group = unique(veh_group))
+rot_mass_factors$share.rotmass<- rot_mass_factors$avg_rot_mass*rot_mass_factors$share
+rot_mass_factors <- ddply(rot_mass_factors, ~veh_group, summarise, avg_rot_m = sum(share.rotmass))
+
+
+# Calculo de la media de las variables específicas de vehículos
+sum_veh_specific_var<- calc_sum_specific_var(tot_vehicles_data, fleetshare)
+
+
+# Calculo VSPs
+drive_cycles_ss_dt_car <- data.table(filter(drive_cycles_ss, Vehicle_type == "Car"))
+drive_cycles_ss_dt_car[,rot_mass_f:= (calc_rot_mass_factor(max_car, Av_link_speed))]
+drive_cycles_ss_dt_car[, avg_VSP:= (calc_power_PC(Av_link_speed, acc, rot_mass_f))]
+drive_cycles_ss_dt_car[, rot_mass_f:= NULL]
+
+drive_cycles_ss_dt_bus <- data.table(filter(drive_cycles_ss, Vehicle_type == "Bus"))
+drive_cycles_ss_dt_bus[, dec_coast:= (calc_Decel_coast_BUS(Av_link_speed))] # Al bus se le añade el decel_coast
+drive_cycles_ss_dt_bus[, avg_VSP:= (calc_power_BUS(Av_link_speed, acc))]
+drive_cycles_ss_dt_bus$avg_VSP<- drive_cycles_ss_dt_bus$avg_VSP * tunning_VSP # Desfase respecto a VSP original
+
+
+drive_cycles_ss_dt_hdv <- data.table(filter(drive_cycles_ss, Vehicle_type == "HDV"))
+drive_cycles_ss_dt_hdv[, avg_VSP:= (calc_power_HDV(Av_link_speed, acc))]
+drive_cycles_ss_dt_hdv$avg_VSP <- drive_cycles_ss_dt_hdv$avg_VSP * tunning_VSP # Desfase respecto a VSP original
+
+# Normalizar VSP drive cycles
+drive_cycles_ss_dt_car[,norm_VSP:= (avg_VSP/avg_critic_P[3,2])]
+drive_cycles_ss_dt_bus[,norm_VSP:= (avg_VSP/avg_critic_P[1,2])]
+drive_cycles_ss_dt_hdv[,norm_VSP:= (avg_VSP/avg_critic_P[2,2])]
+
+## Final interpolation
+interpolated_value_PC <- drive_cycles_ss_dt_car[, c("NOx", "HC", "CO", "PM", "PN", "NO"):= (approx_vsp(drive_cycles_ss_dt_car, "Car"))]
+interpolated_value_Bus <- drive_cycles_ss_dt_bus[, c("NOx", "HC", "CO", "PM", "PN", "NO"):= (approx_vsp(drive_cycles_ss_dt_bus, "Bus"))]
+interpolated_value_HDV <- drive_cycles_ss_dt_hdv[, c("NOx", "HC", "CO", "PM", "PN", "NO"):= (approx_vsp(drive_cycles_ss_dt_hdv, "HDV"))]
+
+
+# Coasting and idle corrections
+want = which(interpolated_value_PC$Av_link_speed < 0.5)
+  interpolated_value_PC$NOx[want] = idle[3,2]
+  interpolated_value_PC$HC[want] = idle[3,3]
+  interpolated_value_PC$CO[want] = idle[3,4]
+  interpolated_value_PC$PM[want] = idle[3,5]
+  interpolated_value_PC$PN[want] = idle[3,6]
+  interpolated_value_PC$NO[want] = idle[3,7]
+
+want = which(interpolated_value_PC$acc < -0.28)
+  interpolated_value_PC[want, 9:14] = 0
+
+
+want = which(interpolated_value_HDV$Av_link_speed < 0.5)
+  interpolated_value_HDV$NOx[want] = idle[2,2]
+  interpolated_value_HDV$HC[want] = idle[2,3]
+  interpolated_value_HDV$CO[want] = idle[2,4]
+  interpolated_value_HDV$PM[want] = idle[2,5]
+  interpolated_value_HDV$PN[want] = idle[2,6]
+  interpolated_value_HDV$NO[want] = idle[2,7]
+
+want = which(interpolated_value_HDV$acc < -0.28)
+  interpolated_value_HDV[want, 9:14] = 0
+
+
+want = which(interpolated_value_Bus$Av_link_speed < 0.5)
+  interpolated_value_Bus$NOx[want] = idle[1,2]
+  interpolated_value_Bus$HC[want] = idle[1,3]
+  interpolated_value_Bus$CO[want] = idle[1,4]
+  interpolated_value_Bus$PM[want] = idle[1,5]
+  interpolated_value_Bus$PN[want] = idle[1,6]
+  interpolated_value_Bus$NO[want] = idle[1,7]
+
+want = which(interpolated_value_Bus$Av_link_speed > 2.78 & interpolated_value_Bus$acc < interpolated_value_Bus$dec_coast)
+  interpolated_value_Bus[want, 10:15] = 0
+
+# Multiplying per flow and calculation of the link pollutant totals: Passing from g/veh/h => g/s
+interpolated_value_PC[,9:14] <- interpolated_value_PC[,9:14]*interpolated_value_PC$Flow/3600
+interpolated_value_Bus[,10:15] <- interpolated_value_Bus[,10:15]*interpolated_value_Bus$Flow/3600
+interpolated_value_HDV[,9:14] <- interpolated_value_HDV[,9:14]*interpolated_value_HDV$Flow/3600
+
+if (hourly) {
+  interpolated_value_PC$Hr <- as.integer(interpolated_value_PC$Time/3600.1)
+  interpolated_value_HDV$Hr <- as.integer(interpolated_value_HDV$Time/3600.1)
+  interpolated_value_Bus$Hr <- as.integer(interpolated_value_Bus$Time/3600.1)
+
+  interpolated_value_PC_splited <- interpolated_value_PC %>%
+    group_by(LinkID, Hr) %>%
+    summarise(link_speed_av = mean(Av_link_speed),
+              NOx = sum(NOx),
+              HC = sum(HC),
+              CO = sum(CO),
+              PM = sum(PM),
+              PN = sum(PN),
+              NO = sum(NO))
+  interpolated_value_PC_splited$veh_group<- "car"
+
+  interpolated_value_HDV_splited <- interpolated_value_HDV %>%
+    group_by(LinkID, Hr) %>%
+    summarise(link_speed_av = mean(Av_link_speed),
+              NOx = sum(NOx),
+              HC = sum(HC),
+              CO = sum(CO),
+              PM = sum(PM),
+              PN = sum(PN),
+              NO = sum(NO))
+  interpolated_value_HDV_splited$veh_group<- "hdv"
+
+  interpolated_value_Bus_splited <- interpolated_value_Bus %>%
+    group_by(LinkID, Hr) %>%
+    summarise(link_speed_av = mean(Av_link_speed),
+              NOx = sum(NOx),
+              HC = sum(HC),
+              CO = sum(CO),
+              PM = sum(PM),
+              PN = sum(PN),
+              NO = sum(NO))
+  interpolated_value_Bus_splited$veh_group<- "bus"
+    cat("Aggregating results per link AND hour")
+
+} else {
+  interpolated_value_PC_splited <- ddply(interpolated_value_PC, ~LinkID, summarise, link_speed_av = mean(Av_link_speed),
+                                         NOx = sum(NOx),
+                                         HC = sum(HC),
+                                         CO = sum(CO),
+                                         PM = sum(PM),
+                                         PN = sum(PN),
+                                         NO = sum(NO))
+  interpolated_value_PC_splited$veh_group<- "car"
+
+  interpolated_value_HDV_splited <- ddply(interpolated_value_HDV, ~LinkID, summarise, link_speed_av = mean(Av_link_speed),
+                                          NOx = sum(NOx),
+                                          HC = sum(HC),
+                                          CO = sum(CO),
+                                          PM = sum(PM),
+                                          PN = sum(PN),
+                                          NO = sum(NO))
+  interpolated_value_HDV_splited$veh_group<- "hdv"
+
+  interpolated_value_Bus_splited <- ddply(interpolated_value_Bus, ~LinkID, summarise, link_speed_av = mean(Av_link_speed),
+                                          NOx = sum(NOx),
+                                          HC = sum(HC),
+                                          CO = sum(CO),
+                                          PM = sum(PM),
+                                          PN = sum(PN),
+                                          NO = sum(NO))
+  interpolated_value_Bus_splited$veh_group<- "bus"
+  cat("Caution: Aggregating ALL results per link, no time grouping")
+}
+
+
+rm(criticP_share, avg_critic_P, drive_cycles_ss, drive_cycles_ss_dt_bus, drive_cycles_ss_dt_car,
+   drive_cycles_ss_dt_hdv, idle, max_rot_share, rot_mass_factors, rot_mass_factors1,
+   sum_veh_specific_var, tot_emissions_EF, veh_critial_power, interpolated_value_Bus,
+   interpolated_value_HDV, interpolated_value_PC)
+
+emis_city<- bind_rows(interpolated_value_Bus_splited, interpolated_value_HDV_splited, interpolated_value_PC_splited)
+emis_city$link_speed_av <- emis_city$link_speed_av*3.6 # Back to km/h, needed for non-exhaust
+
+# Georeference
+emis_city <- left_join(emis_city, roads, by = c("LinkID" = "id"))
+emis_city <- st_as_sf(emis_city, sf_column_name = "geometry")
+emis_city <- st_set_crs(emis_city, "+proj=utm +zone=31 +datum=WGS84 +units=m + no_defs")
+
+############### ============== Non-Exhaust ============== ###############
+if (non_exhaust) {
+
+### Cold -Start ###
+
+# Diesel and petrol total weight
+names(fleetshare)[1:2] <- c("vehicle_group", "vehicle_class")
+diesel <- dplyr::filter(fleetshare, grepl("_D_",vehicle_class))
+diesel <- sum(diesel$share)/3
+gasoline<- dplyr::filter(fleetshare, grepl("_G_|_CNG_",vehicle_class)) # CNG behaves like gasoline (p.63, 64)
+gasoline <- sum(gasoline$share)/3
+
+#Generic variables
+agg<- emis_city
+agg$long <- st_length(agg)
+agg$long <- set_units(agg$long, km)
+attributes(agg$long) <- NULL
+agg$name <- NULL
+eHot_HC <- agg$HC # en g/h
+eHot_NOx <- agg$NOx # en g/h
+eHot_PM <- agg$PM
+M <- agg$long # longitud del link (donde se emiten) [km]
+
+# Cold mileage percentage beta
+beta <- (0.6474 - 0.02545*ltrip - (0.00974 - 0.000385*ltrip)*ta)
+
+### eCold / eHot quotients for Petrol and Diesel ###
+eCold_Hot_P <- calc_Cold_Hot_P(agg)
+
+# No PM cold-start emissions for Petrol
+
+# Diesel
+eCold_Hot_D<- calc_Cold_Hot_D()
+cold_start <- calc_cold_start(eCold_Hot_P, eCold_Hot_D, agg)
+
+rm(diesel, gasoline, beta, eCold_Hot_P, eCold_Hot_D, eHot_PM, eHot_HC, eHot_NOx, ltrip, ta)
+
+
+### Resuspension ###
+flows_tot <- read_csv(file_flows) %>%
+  mutate(interval = interval/3600 - 1) %>%
+  filter(Flow_tot != 0)
+
+agg<- left_join(agg, flows_tot, by = c("LinkID", "veh_group", c("Hr" = "interval")))
+N <- agg$Flow_tot
+ef_constants<- read.csv(file_resuspension_ef) # [g/km/veh]
+ef <- NULL
+
+# Read and calculate specific weights of PC and LDV #
+PC<- weight_PC(fleetshare)
+LDV<- weight_LDV(fleetshare)
+ef<- ef_calc(agg, ef_constants) # Resuspension emission factors according to each vehicle group
+
+resuspension <- calc_resuspension(agg)
+
+rm(ef_constants, ef)
+
+## Wear ##
+base<- select(agg, LinkID, Hr, veh_group, link_speed_av, Flow_tot, NOx, HC)
+base$geometry <- NULL
+base <- ungroup(base)
+
+# TYRE wear #
+tPC <- 0.0107
+tLDV <- 0.0169
+tPC_LDV <- tPC*PC + tLDV*LDV # Table 3-4
+t_motos <- 0.0046 # Table 3-4
+tHDV <- 0.5*tPC*(1.41+1.38*0.5)  # Eq. 3 i 4 (assuming 50% truck load)
+t_E <- data_frame(tPC_LDV, t_motos, tHDV)
+
+t_Fs10 <- 0.6 # mass fraction for PM10. Table 3-5
+t_Fs25 <- 0.42 # Mass fraction for PM2.5. Table 3-5
+
+# S(v) value #
+t_Ss <- NULL  # Eq. 5
+for (i in (1:nrow(base))){
+  if (base$link_speed_av[i] < 40) {
+    t_Ss[i] <- 1.39
+  } else if (base$link_speed_av[i] >= 40 & base$link_speed_av[i] <= 90) {
+    t_Ss[i] <- (-0.00974*base$link_speed_av[i]+1.78)
+  } else {
+    t_Ss[i] <- 0.902
+  }
+}
+
+t_wear<- data.frame(N, M, t_E, t_Fs10, t_Fs25, t_Ss, Te_Tyre = NA)
+t_wear$Te_Tyre <- t_wear$N * t_wear$M * t_wear$t_Ss
+final_t_wear<- bind_cols(base, t_wear)
+
+# Multiplicamos por los EF de tipologia de vehículo
+
+final_t_wear <- adply(final_t_wear, 1, calc_tyre_wear)
+
+# Mass fraction #
+final_t_wear$Te_Tyre_PM10<- final_t_wear$V1 * t_Fs10
+final_t_wear$Te_Tyre_PM25<- final_t_wear$V1 * t_Fs25
+
+final_t_wear <- final_t_wear[,c("LinkID", "Hr", "veh_group", "Te_Tyre_PM10", "Te_Tyre_PM25")]
+rm(i, t_motos, t_Ss, tHDV, tPC, tLDV, tPC_LDV, t_E, t_wear, t_Fs10, t_Fs25)
+
+
+## BRAKE wear ##
+
+bPC <- 0.0075 # Table 3-6
+bLDV<- 0.0117
+bPC_LDV <- bPC*PC + bLDV*LDV
+
+b_motos <- 0.0037 # Table 3-6
+bHDV <- 3.13*bPC*(1+0.79*0.5)  # Eq. 6 i 7
+b_E <- data_frame(bPC_LDV, b_motos, bHDV)
+b_Fs10 <- 0.98 # Mass fraction for PM10 Table 3-7
+#b_Fs25 <- 0.39 # Mass fraction for PM2.5 Table 3-7
+
+b_Ss <- NULL  # Eq. 5
+for (i in (1:nrow(base))){
+  if (base$link_speed_av[i] < 40) {
+    b_Ss[i] <- 1.67
+  } else if (base$link_speed_av[i] >= 40 & base$link_speed_av[i] <= 95) {
+    b_Ss[i] <- (-0.0270*base$link_speed_av[i]+2.75)
+  } else {
+    b_Ss[i] <- 0.185
+  }
+}
+
+b_wear<- data.frame(N, M, b_E, b_Fs10, b_Ss, Te_Break = NA) # b_Fs25
+b_wear$Te_Break <- b_wear$N * b_wear$M * b_wear$b_Ss
+final_b_wear<- bind_cols(base, b_wear)
+
+## Multiplicamos por los EF de tipologia de vehículo
+final_b_wear <- adply(final_b_wear, 1, calc_break_wear)
+
+final_b_wear$Te_Break_PM10 <- final_b_wear$V1 * final_b_wear$b_Fs10
+#final_b_wear$Te_Break_PM25 <- final_b_wear$Te_Break * final_b_wear$b_Fs25
+
+final_b_wear<- final_b_wear[, c("LinkID", "Hr", "veh_group", "Te_Break_PM10")] # Te_Break_PM10
+rm(i, b_Fs10, b_Fs25 , b_motos, b_Ss, bHDV, bPC, bLDV, bPC_LDV, b_E, b_wear)
+
+
+## ROAD SURFACE wear ##
+
+## Equacion: Te = Sum( Nj·Mj·Ef·Fsi )  Eq. 9 [g]
+
+sPC <- 0.015 # Table 3-8
+sLDV <- 0.015 # Table 3-8
+sPC_LDV<- 0.015
+s_motos <- 0.006 # Table 3-8
+sHDV <- 0.076  # Eq. 3 i 4
+s_E <- data_frame(sPC_LDV, s_motos, sHDV)
+s_Fs10 <- 0.5 #mass fraction for PM10. Table 3-9
+s_Fs25 <- 0.27 #mass fraction for PM2.5. Table 3-9
+
+s_wear<- data.frame(N, M, s_E, s_Fs10, s_Fs25, Te_surface = NA)
+s_wear$Te_surface <- s_wear$N * s_wear$M
+final_s_wear<- bind_cols(base, s_wear)
+
+
+## Multiplicamos por los EF de tipologia de vehículo
+
+final_s_wear <- adply(final_s_wear, 1, calc_surface_wear)
+
+final_s_wear$Te_Surface_PM10 <- final_s_wear$V1 * final_s_wear$s_Fs10
+final_s_wear$Te_Surface_PM25 <- final_s_wear$V1 * final_s_wear$s_Fs25
+final_s_wear<- final_s_wear[, c("LinkID", "Hr", "veh_group", "Te_Surface_PM10", "Te_Surface_PM25")]
+
+# wear <-cbind(final_b_wear, select(final_s_wear, -c(LinkID, veh_group)), select(final_t_wear, -c(LinkID, veh_group)))
+
+wear<- left_join(final_b_wear, final_s_wear, by = c("LinkID", "Hr", "veh_group")) %>%
+  left_join(final_t_wear, by = c("LinkID", "Hr", "veh_group"))
+
+wear <- transmute(wear, LinkID = LinkID, Hr = Hr, veh_group = veh_group,
+                  PM10 = wear$Te_Break_PM10 + wear$Te_Surface_PM10 + wear$Te_Tyre_PM10,
+                  PM25 = wear$Te_Surface_PM25 + wear$Te_Tyre_PM25) #wear$Te_Break_PM25
+
+rm(flows_tot, agg, final_b_wear, final_s_wear, final_t_wear,fleetshare, s_Fs10, s_Fs25, s_motos, sHDV, sPC, sLDV, sPC_LDV, s_E, s_wear, base, M, N, PC, LDV)
+
+# All non-exhaust merge
+non_exhaust_data<- left_join(cold_start, resuspension, by = c("LinkID", "Hr", "veh_group")) %>%
+  left_join(wear, by = c("LinkID", "Hr", "veh_group"))
+non_exhaust_data <- transform(non_exhaust_data, PM10 = PM_cold+Eres+PM10, PM_cold = NULL, Eres = NULL)
+
+# Join exhaust emissions with non-exhaust #
+emis_city <- left_join(emis_city, non_exhaust_data, by = c("LinkID", "Hr", "veh_group")) %>%
+  transform(NOx = NOx + NOx_cold, NOx_cold = NULL, HC = HC + HC_cold, HC_cold = NULL,
+            PM = PM10 + PM, PM10 = NULL)
+
+## End Non-Exhaust ##
+}
+
+############### Other aggregations ###############
+
+emis_global <- emis_city %>%  # Sum of the different vehicle group emissions
+  group_by(LinkID, Hr) %>%
+  summarise(link_speed = mean(link_speed_av),
+            NOx = sum(NOx),
+            HC = sum(HC),
+            CO = sum(CO),
+            PM = sum(PM),
+            PN = sum(PN),
+            NO = sum(NO))
+
+emis_global$long <- st_length(emis_global)
+emis_global$long <- set_units(emis_global$long, km)
+attributes(emis_global$long) <- NULL
+
+emis_global<- mutate(emis_global,  #units [g/h/km]
+                     NOx = NOx/long,
+                     HC = HC/long,
+                     CO = CO/long,
+                     PM = PM/long,
+                     PN = PN/long,
+                     NO = NO/long)
+
+links_out <- emis_global[emis_global$LinkID %in% c("2618", "2986", "2980", "2971", "2617", "2989", "2953", "2956", "2959"),]
+links_in <- emis_global[emis_global$LinkID %in% c("2983", "2977", "2974","2992" , "2620", "2968", "2965", "2962", "2621"),]
+
+
+links_out <- links_out %>%
+  group_by(Hr) %>%
+  summarise(link_speed = mean(link_speed),
+            NOx = mean(NOx),
+            HC = mean(HC),
+            CO = mean(CO),
+            PM = mean(PM),
+            PN = mean(PN),
+            NO = mean(NO))
+
+links_in <- links_in %>%
+  group_by(Hr) %>%
+  summarise(link_speed = mean(link_speed),
+            NOx = mean(NOx, na.rm = T),
+            HC = mean(HC),
+            CO = mean(CO),
+            PM = mean(PM),
+            PN = mean(PN),
+            NO = mean(NO))
+
+links_interest<- rbind(links_in, links_out)
+
+
+links_interest <- links_interest %>%  # Sum of the different vehicle group emissions
+  group_by(Hr) %>%
+  summarise(link_speed = mean(link_speed),
+            NOx = sum(NOx),
+            HC = sum(HC),
+            CO = sum(CO),
+            PM = sum(PM),
+            PN = sum(PN),
+            NO = sum(NO))
+links_interest$geometry <- NULL
+
+saveRDS(emis_global, "total_emissions_PLc")
+write.csv(links_interest, "total_emis_segmented.csv", row.names = F)
+
+
+# hour_of_interest <- 8
+# emis_global <- filter(emis_global, Hr == hour_of_interest)
+# mapview::mapview(emis_global, zcol = "NOx")
+
+# mapview(emis_city, zcol = "sum_nox", legend = T, at = seq(0, 150, 30), na.color = "red")
+
+
+
+
+wear_bus<- filter(wear, veh_group == "bus")
+swear_bus<- sum(wear_bus$PM10)
+s_bus<- filter(emis_city, veh_group == "bus")
+s_bus<-sum(s_bus$PM)
+swear_bus/s_bus
+
+wear_hdv<- filter(wear, veh_group == "hdv")
+swear_hdv<- sum(wear_hdv$PM10)
+s_hdv<- filter(emis_city, veh_group == "hdv")
+s_hdv<-sum(s_hdv$PM, na.rm = T)
+swear_hdv/s_hdv
+
+wear_car<- filter(wear, veh_group == "car")
+swear_car<- sum(wear_car$PM10)
+s_car<- filter(emis_city, veh_group == "car")
+s_car<-sum(s_car$PM, na.rm = T)
+swear_car/s_car
+
+
+# ---
+
+resuspension_bus<- filter(resuspension, veh_group == "bus")
+sresuspension_bus<- sum(resuspension_bus$Eres)
+s_bus<- filter(emis_city, veh_group == "bus")
+s_bus<-sum(s_bus$PM)
+sresuspension_bus/s_bus
+
+resuspension_hdv<- filter(resuspension, veh_group == "hdv")
+sresuspension_hdv<- sum(resuspension_hdv$Eres)
+s_hdv<- filter(emis_city, veh_group == "hdv")
+s_hdv<-sum(s_hdv$PM, na.rm = T)
+sresuspension_hdv/s_hdv
+
+resuspension_car<- filter(resuspension, veh_group == "car")
+sresuspension_car<- sum(resuspension_car$Eres)
+s_car<- filter(emis_city, veh_group == "car")
+s_car<-sum(s_car$PM, na.rm = T)
+sresuspension_car/s_car
+
+# ---
+
+cold_start_bus<- filter(cold_start, veh_group == "bus")
+scold_start_bus<- sum(cold_start_bus$PM_cold)
+s_bus<- filter(emis_city, veh_group == "bus")
+s_bus<-sum(s_bus$PM)
+scold_start_bus/s_bus
+
+cold_start_hdv<- filter(cold_start, veh_group == "hdv")
+scold_start_hdv<- sum(cold_start_hdv$PM_cold, na.rm = T)
+s_hdv<- filter(emis_city, veh_group == "hdv")
+s_hdv<-sum(s_hdv$PM, na.rm = T)
+scold_start_hdv/s_hdv
+
+cold_start_car<- filter(cold_start, veh_group == "car")
+scold_start_car<- sum(cold_start_car$PM_cold, na.rm = T)
+s_car<- filter(emis_city, veh_group == "car")
+s_car<-sum(s_car$PM, na.rm = T)
+scold_start_car/s_car
+
+
+
+#### Para guardar ####
+#
+write_csv(filter(interpolated_value_PC, LinkID == 925), paste0(output_path,"PC_925.csv"))
+write_csv(filter(interpolated_value_Bus, LinkID == 743), paste0(output_path,"Bus743.csv"))
+write_csv(filter(interpolated_value_HDV, LinkID == 766), paste0(output_path,"HDV766.csv"))
+#
+#
+# write_csv(interpolated_value_PC_splited, paste0(output_path,"PC_FIN.csv"))
+# write_csv(interpolated_value_Bus_splited, paste0(output_path,"Bus_FIN.csv"))
+# write_csv(interpolated_value_HDV_splited, paste0(output_path,"HDV_FIN.csv"))
+
+write_csv(emis_city, paste0(output_path,"emis_city_nonNE.csv"))
+saveRDS(emis_city, paste0(output_path,"emis_city"))
+saveRDS(interpolated_value_PC,  paste0(output_path,"int_value_PC"))
+# emis_city_car<- filter(emis_city, veh_group == "car")
+# emis_city_bus<- filter(emis_city, veh_group == "bus")
+# emis_city_hdv<- filter(emis_city, veh_group == "hdv")
+#
+# NE_emis_city_car<- filter(emis_city, veh_group == "car")
+# NE_emis_city_bus<- filter(emis_city, veh_group == "bus")
+# NE_emis_city_hdv<- filter(emis_city, veh_group == "hdv")
+#
+# x <- sum(emis_city_hdv$PM, na.rm=T)
+# y <- sum(NE_emis_city_hdv$PM, na.rm = T)
+#
+# (x-y)/x*100
+#
+# emis_city1<- emis_city
+# emis_city1$geometry <- NULL
+# emis_city1 <- ungroup(emis_city1)
+# x<- select(filter(emis_city1, veh_group == "car"), link_speed_av)
+# mean(x, na.rm = T)
+
+tot_car<- sum(select(filter(flows_tot, veh_group == "car"), Flow_tot), na.rm = T)
+tot_hdv<- sum(select(filter(flows_tot, veh_group == "hdv"), Flow_tot), na.rm = T)
+tot_bus<- sum(select(filter(flows_tot, veh_group == "bus"), Flow_tot), na.rm = T)
+
+tot<- tot_car + tot_bus + tot_hdv
+tot_car/tot*100
+tot_bus/tot*100
+tot_hdv/tot*100

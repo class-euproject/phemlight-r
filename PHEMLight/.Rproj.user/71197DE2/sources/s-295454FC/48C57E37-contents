@@ -1,0 +1,84 @@
+# script to run an example of caliope-urban using inputs generated in /esarchive/scratch/jbenavides/sim_rline_bcn/384/Diagonal_4/20150114/streetair.R
+library(urbanair, lib.loc ='/home/Earth/jpere1/urbanair_install')
+## ###########################################################
+## Start configuration
+## ###########################################################
+
+### define paths
+## simulation folder
+sim_folder_path <- "/esarchive/scratch/drodrig1/experiments/camp_nou_Jaime/test_2/"
+#output_path <- paste0(imput_path,"output/")
+simul_num <- 377
+sim_folder_path <- paste0("/esarchive/scratch/jbenavides/sim_rline_bcn/", simul_num, "/")
+mkdirs(sim_folder_path)
+## data input
+data_path <- "/esarchive/scratch/jbenavides/data/"
+project_path <- "/home/Earth/jpere1/R-LINEdev/RLINE_street/"
+
+
+# R-LINE executable
+rline_path <- paste0(project_path, "RLINE_retro_local_all.x")
+
+# measurement height
+h <- 1.5
+
+## Emissions
+emis_pollutant = c("EC")
+
+## Chemistry
+chemistry_option <- 0
+
+
+## Other R-LINE configuration file options
+# Ratio of displacement height to roughness length
+fac_dispht <- 5 #is zhref from WRF
+# Include concentrations from ['M'] Meander ONLY, ['P'] Plume ONLY, ['T'] Total = Plume+Meander
+conc_contrib <- "T"
+# Use non-zero roadwidth? ('Y'/'N')
+use_roadwidth <- "Y"
+# Use local met
+use_localmet <- "Y"
+# Use local background
+use_localbg <- "Y"
+sim_path <- "/esarchive/scratch/jbenavides/sim_rline_bcn/384/Diagonal_4/20150114/"
+
+date <- "20150114"
+
+scenario_name <- "test_dani"
+sim_path_scenario <- paste0(sim_folder_path, scenario_name, "/")
+mkdirs(sim_path_scenario)
+system(paste0("cp ", sim_path, "* ", sim_path_scenario))
+
+
+config_rline(sim_path = sim_path_scenario, fac_dispht = fac_dispht, conc_contrib = conc_contrib, use_roadwidth = use_roadwidth, use_localbg = use_localbg, use_analytical = "N", emis_pollutant = emis_pollutant,
+             lane_width = 2.5, use_localmet = "Y", chemistry_option = chemistry_option, date = date, use_sourceapp = "Y", use_stability_type = "N",
+             stability_type = "none")
+
+#   run caliope_urban
+
+run_rline(rline_path = rline_path, sim_path = sim_path_scenario)
+
+
+# to investigate the roads and the emissions used in this script
+
+roads <- sf::st_read(paste0(sim_path_scenario, "roads_geom/", "road_links_bcn_geom.shp"))
+emis_ec <- read.csv(paste0(sim_path_scenario, "emis_PLc/","rline_20150101_PM.csv"))
+
+# plot emissions
+
+mapview::mapviewOptions(basemaps = c("Esri.WorldImagery"),
+                        raster.palette = colorRampPalette(rev(rainbow(4)))(200),
+                        vector.palette = colorRampPalette(rev(rainbow(4)))(200),
+                        na.color = "grey",
+                        layers.control.pos = "topright")
+
+hour <- 8
+roads$emis_ec <- as.numeric(emis_ec[hour,6:length(emis_ec)]) * 3600
+nam <- paste0("map_hour_", (hour-1))
+assign(nam, mapview::mapview(roads, zcol = "emis_ec", legend = TRUE,
+                             color = colorRampPalette(rev(rainbow(3)))(200), at = seq(0, 0.24, 0.03),
+                             layer.name = "EC emissions in ug/m/h", lwd = 5))
+mapview::mapshot(get(nam), url = paste0(sim_path_scenario, nam, ".html"))
+
+
+

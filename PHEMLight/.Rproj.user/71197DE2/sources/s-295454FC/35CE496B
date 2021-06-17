@@ -1,0 +1,21 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1554818856447.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "855547281",
+    "id" : "35CE496B",
+    "lastKnownWriteTime" : 1554819039,
+    "last_content_update" : 1554819039541,
+    "path" : "~/Documents/Doctorado/PHEMlight/my_PHEMLight_coding/PHEMLight/R/emis_to_hermes.R",
+    "project_path" : "R/emis_to_hermes.R",
+    "properties" : {
+        "tempName" : "Untitled1"
+    },
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

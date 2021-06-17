@@ -1,0 +1,22 @@
+Package: PHEMLight
+Type: Package
+Title: Calculate instantaneous vehicle emissions with PHEMLight
+Version: 0.1.0
+Author: Daniel Rodriguez-Rey <daniel.rodriguez@bsc.es> [aut, cre]
+Maintainer: The package maintainer <yourself@somewhere.net>
+Description: It calculates vehicle specifc power (VSP) from 
+    a drive cycle file. According to the emission factors of
+    the vehicle fleet provided, to then determine 
+    NOx, CO, HC, PM and PN emissions both exhaust and non-exhast 
+    (cold-start, resuspension, road, tyre and break wear).
+Encoding: UTF-8
+LazyData: true
+Imports: readr,
+    sf,
+    plyr,
+    dplyr,
+    data.table,
+    units,
+    tidyr
+Suggests: testthat
+RoxygenNote: 6.1.1

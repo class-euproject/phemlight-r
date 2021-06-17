@@ -1,0 +1,21 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1554819044627.000,
+    "dirty" : true,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "470267688",
+    "id" : "7A06FED8",
+    "lastKnownWriteTime" : 1554819397,
+    "last_content_update" : 1554819403013,
+    "path" : "~/Documents/Doctorado/PHEMlight/my_PHEMLight_coding/PHEMLight/R/map_vehicle_categories.R",
+    "project_path" : "R/map_vehicle_categories.R",
+    "properties" : {
+        "tempName" : "Untitled1"
+    },
+    "relative_order" : 2,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

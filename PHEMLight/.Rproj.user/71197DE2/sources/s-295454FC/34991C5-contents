@@ -1,0 +1,102 @@
+library(urbanair, lib.loc = '/home/Earth/jpere1/urbanair_install')
+
+
+library(readr)
+library(sf)
+library(plyr)
+library(dplyr)
+# library(data.table)
+# library(units)
+
+simul_num <- "test_2"
+sim_folder_path <- paste0("/esarchive/scratch/drodrig1/experiments/camp_nou_Jaime/", simul_num, "/")
+sim_path<- paste0("/esarchive/scratch/drodrig1/experiments/camp_nou_Jaime/", simul_num, "/")
+spatial_context_shp_path <- "/esarchive/scratch/drodrig1/experiments/camp_nou_Jaime/spatial_context"
+path_roads<- "/esarchive/scratch/drodrig1/experiments/camp_nou_Jaime/test_2/"
+
+
+data_path <- "/esarchive/scratch/jbenavides/data/"
+geom_path <- paste0(data_path, "geom/")
+#data output
+#spatial_context_shp_path <- paste0(sim_path, "spatial_context.shp")
+
+# area_type <- "buffer"
+# buffer_extension <- 700
+# area_name <- NULL
+#
+# lon <- 2.119551
+# lat <- 41.382534
+
+## Spatial Context
+# spatial_context <- context_sp(coords = prof_road_edge, area_type = "buffer", lon = lon, lat = lat,
+#                               geom_path = geom_path, buffer = buffer_extension, area_shape = "square")
+#
+# sf::st_write(spatial_context, dsn = spatial_context_shp_path, layer = "spatial_context",
+#              driver = "ESRI  Shapefile", delete_dsn = TRUE)
+
+
+## Roads
+roads <- sf::read_sf(path_roads)
+#roads <- subset(roads, select = c("id", "name"))
+roads_context <- sf::read_sf(paste0(path_roads, "road_links_bcn_geom.shp")) %>%
+  sf::as_Spatial()
+
+roads_rline_local <- function(roads = roads, sim_path = sim_path) {
+
+  if(class(roads)[1] == "sf"){
+    roads <- methods::as(roads, "Spatial")
+  }
+
+  # extract coordinates and prepare as R-LINE input format
+  res <- lapply(slot(roads[1:nrow(roads@data),], "lines"), function(x) lapply(slot(x, "Lines"),function(y) slot(y, "coords")))
+
+  b <-  c("Group", "X_b", "Y_b", "Z_b", "X_e", "Y_e", "Z_e" , "dCL", "sigmaz0", "#lanes", "lanewidth",
+          "Emis", "Hw1", "dw1", "Hw2", "dw2", "Depth", "Wtop", "Wbottom", "l_bh2sw", "l_avgbh", "l_avgbdensity", "l_bhdev",
+          "X0_af", "X45_af", "X90_af", "X135_af", "X180_af", "X225_af", "X270_af", "X315_af", "max_height", "AADT")
+  nodata<- roads
+  #nodata <- as.data.frame(setNames(replicate(length(b),numeric(0), simplify = F), b))
+  for (i in 1:length(res)){
+    transactor <- data.frame(res[i])
+    nodata[i,1] <- "G1" # as.character(Roads@data$NVia_D[i])
+    nodata[i,2:3] <- round(transactor[1,1:2], digits = 3)
+    nodata[i,4] <- 1
+    nodata[i,5:6] <- round(transactor[2,1:2], digits = 3)
+    nodata[i,7] <- 1
+    nodata[i,8] <- 0
+    nodata[i,9] <- 2 # sigmaz0
+    nodata[i,10] <- 3 #lanes
+    nodata[i,11] <- 2.5 # lanewidth
+    nodata[i,12] <- 1 # Emis
+    nodata[i,13] <- 0
+    nodata[i,14] <- 0
+    nodata[i,15] <- 0
+    nodata[i,16] <- 0
+    nodata[i,17] <- 0
+    nodata[i,18] <- 0
+    nodata[i,19] <- 0
+    nodata[i,20] <- round(roads@data[i, 7], digits = 3)
+    nodata[i,21] <- round(roads@data[i, 8], digits = 3)
+    nodata[i,22] <- round(roads@data[i, 9], digits = 3)
+    nodata[i,23] <- round(roads@data[i, 10], digits = 3)
+    nodata[i,24] <- round(roads@data[i, 12], digits = 3)
+    nodata[i,25] <- round(roads@data[i, 13], digits = 3)
+    nodata[i,26] <- round(roads@data[i, 14], digits = 3)
+    nodata[i,27] <- round(roads@data[i, 15], digits = 3)
+    nodata[i,28] <- round(roads@data[i, 16], digits = 3)
+    nodata[i,29] <- round(roads@data[i, 17], digits = 3)
+    nodata[i,30] <- round(roads@data[i, 18], digits = 3)
+    nodata[i,31] <- round(roads@data[i, 19], digits = 3)
+    nodata[i,32] <- round(roads@data[i, 9], digits = 3)
+    nodata[i,33] <- 1
+  }
+  Line1 = "Group  X_b    Y_b   Z_b    X_e    Y_e   Z_e  dCL  sigmaz0 #lanes lanewidth Emis  Hw1  dw1  Hw2  dw2 Depth  Wtop  Wbottom  l_bh2sw l_avgbh l_avgbdensity l_bhdev  X0_af  X45_af  X90_af  X135_af  X180_af X225_af  X270_af  X315_af l_maxbh AADT"
+  write(Line1, file = paste0(sim_path, "roads.txt"))
+  write.table(nodata, paste0(sim_path, "roads.txt"), append = TRUE,
+              quote = FALSE, row.names = FALSE, col.names = FALSE,
+              sep = "  ")
+  return(print("roads to rline process finished"))
+}
+
+
+
+roads_rline_local(roads, sim_path)
