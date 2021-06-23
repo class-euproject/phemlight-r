@@ -2,3 +2,4 @@
 out/
 **/.RData
 *pollution*.csv
+**.ipynb_checkpoints/

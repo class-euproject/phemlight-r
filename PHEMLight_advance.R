@@ -23,12 +23,12 @@ drive_cycle_data_path <- args[2]
 output_file <- args[3]
 
 # Configuration Data ------------------------------------------------------
-general_path <- "/home/elli/phemlight/"
+general_path <- "/home/esabate/pollutionMap/phemlight-r/"
 input_path <- paste0(general_path, "in/")
-#drive_cycle_data_path <- paste0("pollution_c1ab17ba54f4.csv")
+drive_cycle_data_path <- paste0(input_path, args[2])
 # file_roads <- "shapefile of the road network, if emissions need to be georeferenciated"
-drive_cycle_data_path <- paste0(general_path, "in/pollution_c694aee0f606.csv")
-print(drive_cycle_data_path)
+#drive_cycle_data_path <- paste0(general_path, "in/pollution_c694aee0f606.csv")
+#print(drive_cycle_data_path)
 drive_cycle_data <- drive_cycle_data_path
 output_path <- paste0(general_path, "out/")
 # file_resuspension_ef <- "resuspension emission factors" # <- You will not use it
@@ -50,8 +50,6 @@ tunning_critP <- 1.15 # No tocar (!!)
 tunning_VSP <-0.9 # No tocar (!!)
 # End configuration data #
 
-
-
 # setwd(input_path)
 
 
@@ -62,9 +60,7 @@ tunning_VSP <-0.9 # No tocar (!!)
 
 
 ## Lists of files needed ##
-print(path_vehicles)
 files_emissions <- list.files(path_vehicles)
-print(files_emissions)
 files_emissions <- files_emissions[!grepl("*FC.csv|*.veh|^Fleet", files_emissions)]
 header<- def_header(paste0(path_vehicles, files_emissions[1]))
 tot_emissions_EF <- ldply(files_emissions, read_csv_emissions)
@@ -73,11 +69,7 @@ tot_emissions_EF <- ldply(files_emissions, read_csv_emissions)
 drive_cycles_ss <- read_csv(drive_cycle_data)
 drive_cycles_ss$Av_link_speed <- drive_cycles_ss$Av_link_speed/3.6 # To m/s
 drive_cycles_ss$Vehicle_type<- as.factor(drive_cycles_ss$Vehicle_type)
-if (aggregated) {
-  drive_cycles_ss <- arrange(drive_cycles_ss, LinkID, Vehicle_type)
-} else {
-  drive_cycles_ss <- arrange(drive_cycles_ss, VehID, Vehicle_type)
-}
+drive_cycles_ss <- arrange(drive_cycles_ss, LinkID, Vehicle_type)
 drive_cycles_ss <- mutate(drive_cycles_ss, acc = ifelse(lead(Time) - Time != 1, 0, ((lead(Av_link_speed) - Av_link_speed)/(lead(Time) - Time)))) # Acceleration, when time gap between vehicles, acc = 0
 
 ## Fleetshares ##
@@ -260,18 +252,20 @@ want = which(interpolated_value_PC$Av_link_speed < 17.5 & interpolated_value_PC$
 # If aggregated = False -> Each vehicle of the link it is considered. Passing from g/veh/h => g/veh/s
 # If aggregated = True -> Vehicles speed is averaged per time-step, then each time-step has to be multiplied per flow.
 #   This should be done when aggregated aimsun results per time-step. g/link/s
-
+interpolated_value_PC[,9:14]
+interpolated_value_PC$Flow
 if(aggregated) {
-  interpolated_value_PC[,11:16] <- interpolated_value_PC[,11:16]*interpolated_value_PC$Flow/3600
-  interpolated_value_Bus[,12:17] <- interpolated_value_Bus[,12:17]*interpolated_value_Bus$Flow/3600
-  interpolated_value_HDV[,11:16] <- interpolated_value_HDV[,11:16]*interpolated_value_HDV$Flow/3600
+  interpolated_value_PC[,9:14] <- interpolated_value_PC[,9:14]*interpolated_value_PC$Flow/3600
+  interpolated_value_Bus[,10:15] <- interpolated_value_Bus[,10:15]*interpolated_value_Bus$Flow/3600
+  interpolated_value_HDV[,9:14] <- interpolated_value_HDV[,9:14]*interpolated_value_HDV$Flow/3600
   
   message1 <- "Vehicle emissions aggregated per vehicle group and time-step: g/link/s"
   
 }  else {
-  interpolated_value_PC[,11:16] <- interpolated_value_PC[,11:16]/3600
-  interpolated_value_Bus[,12:17] <- interpolated_value_Bus[,12:17]/3600
-  interpolated_value_HDV[,11:16] <- interpolated_value_HDV[,11:16]/3600
+
+  interpolated_value_PC[,9:14] <- interpolated_value_PC[,9:14]/3600
+  interpolated_value_Bus[,10:15] <- interpolated_value_Bus[,10:15]/3600
+  interpolated_value_HDV[,9:14] <- interpolated_value_HDV[,9:14]/3600
 
   # interpolated_value_PC<- filter(interpolated_value_PC, Time > 32400 & Time < 46800)
   # interpolated_value_Bus<- filter(interpolated_value_Bus, Time > 32400 & Time < 46800)
@@ -279,11 +273,8 @@ if(aggregated) {
   
   message1 <- "Individual vehicle emissions calculation: g/veh/s"
 }
-if (aggregated){
-  byCol = c("LinkID")
-} else{
-  byCol = c("VehID")
-}
+byCol = c("LinkID")
+
 if (intervals) {
     interpolated_value_PC$int <- as.integer(interpolated_value_PC$Time/interval_time)
     interpolated_value_HDV$int <- as.integer(interpolated_value_HDV$Time/interval_time)
@@ -292,14 +283,10 @@ if (intervals) {
     interpolated_value_PC$Hr <- as.integer(interpolated_value_PC$Time/3600.1)
     interpolated_value_HDV$Hr <- as.integer(interpolated_value_HDV$Time/3600.1)
     interpolated_value_Bus$Hr <- as.integer(interpolated_value_Bus$Time/3600.1)
-    
-    print("test0")
     options(dplyr.summarise.inform = FALSE)
-    a <- interpolated_value_PC %>%
+    interpolated_value_PC_splited <- interpolated_value_PC %>%
       group_by_at(c(byCol, 'Hr', 'int')) %>%
       summarise(link_speed_av = mean(Av_link_speed),
-                lat = lat[length(lat)],
-                long = long[length(long)],
                 NOx = sum(NOx, na.rm = T)*3600/interval_time, # This is to have the emissions of that interval for the whole hour
                 HC = sum(HC, na.rm = T)*3600/interval_time,
                 CO = sum(CO, na.rm = T)*3600/interval_time,
@@ -307,12 +294,9 @@ if (intervals) {
                 PN = sum(PN, na.rm = T)*3600/interval_time,
                 NO = sum(NO, na.rm = T)*3600/interval_time)
     interpolated_value_PC_splited$veh_group<- "car"
-    print("test1")
     interpolated_value_HDV_splited <- interpolated_value_HDV %>%
       group_by_at(c(byCol, 'int', 'Hr')) %>%
       summarise(link_speed_av = mean(Av_link_speed),
-                lat = lat[length(lat)],
-                long = long[length(long)],
                 NOx = sum(NOx, na.rm = T)*3600/interval_time,
                 HC = sum(HC, na.rm = T)*3600/interval_time,
                 CO = sum(CO, na.rm = T)*3600/interval_time,
@@ -320,12 +304,9 @@ if (intervals) {
                 PN = sum(PN, na.rm = T)*3600/interval_time,
                 NO = sum(NO, na.rm = T)*3600/interval_time)
     interpolated_value_HDV_splited$veh_group<- "hdv"
-    print("test2")
     interpolated_value_Bus_splited <- interpolated_value_Bus %>%
       group_by_at(c(byCol, 'int', 'Hr')) %>%
       summarise(link_speed_av = mean(Av_link_speed),
-                lat = lat[length(lat)],
-                long = long[length(long)],
                 NOx = sum(NOx, na.rm = T)*3600/interval_time,
                 HC = sum(HC, na.rm = T)*3600/interval_time,
                 CO = sum(CO, na.rm = T)*3600/interval_time,
@@ -350,8 +331,6 @@ if (intervals) {
     interpolated_value_PC_splited <- interpolated_value_PC %>%
       group_by_at(c(byCol)) %>%
        summarise(link_speed_av = mean(Av_link_speed),
-                 lat = lat[length(lat)],
-                 long = long[length(long)],
                  NOx = sum(NOx, na.rm = T),
                  HC = sum(HC, na.rm = T),
                  CO = sum(CO, na.rm = T),
@@ -373,8 +352,6 @@ if (intervals) {
     interpolated_value_HDV_splited <- interpolated_value_HDV %>%
       group_by_at(c(byCol)) %>%
       summarise(link_speed_av = mean(Av_link_speed),
-                 lat = lat[length(lat)],
-                 long = long[length(long)],
                  NOx = sum(NOx, na.rm = T),
                  HC = sum(HC, na.rm = T),
                  CO = sum(CO, na.rm = T),
@@ -396,8 +373,6 @@ if (intervals) {
   interpolated_value_Bus_splited <- interpolated_value_Bus %>%
       group_by_at(c(byCol)) %>%
       summarise(link_speed_av = mean(Av_link_speed),
-                 lat = lat[length(lat)],
-                 long = long[length(long)],
                  NOx = sum(NOx, na.rm = T),
                  HC = sum(HC, na.rm = T),
                  CO = sum(CO, na.rm = T),
@@ -433,8 +408,7 @@ emis_city$link_speed_av <- emis_city$link_speed_av*3.6 # Back to km/h, needed fo
 #cat(message1)
 #cat(message2)
 # saveRDS(emis_city, paste0(output_path, "emis_diagonal_24h_1hsec"))
-write_csv(emis_city, append = TRUE, "history.csv" )
-emis_city
-print(getwd())
-write_csv(emis_city, "stream.csv")
+
+write_csv(emis_city, append = TRUE, paste0(output_path, "history.csv") )
+write_csv(emis_city, paste0(output_path,output_file))
 #system("scp stream.csv vmasip@192.0.2.1:/mnt/data/bscuser/work/pollution-visualization/Data/stream.csv")
