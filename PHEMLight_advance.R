@@ -14,6 +14,7 @@ suppressWarnings(library(units))
 suppressWarnings(library(tidyr))
 suppressWarnings(library(PHEMLight))
 
+
 args <- commandArgs(trailingOnly=T)
 # if (length(args) != 3) {
 #   quit(save="no", status=1)
@@ -21,6 +22,10 @@ args <- commandArgs(trailingOnly=T)
 input_path <- args[1]
 drive_cycle_data_path <- args[2]
 output_file <- args[3]
+
+
+tsIni <- format(Sys.time(),format = '%T')
+
 
 # Configuration Data ------------------------------------------------------
 general_path <- "/home/esabate/pollutionMap/phemlight-r/"
@@ -39,7 +44,7 @@ fleetShare_data <- paste0(input_path, "fleetshare.csv")
 # Aggregated True: Vehicle emissions aggregated per vehicle group and time-step: g/h
 aggregated <- F
 non_exhaust <- F
-intervals <- T
+intervals <- F
 interval_time <- 3600 # seconds
 ta = 10 #Temp. Ambiente
 ltrip <- 6.47 # Average distance in Barcelona [km] (obs. mobilitat 2013)
@@ -391,6 +396,8 @@ rm(criticP_share, avg_critic_P, drive_cycles_ss, drive_cycles_ss_dt_bus, drive_c
 
 emis_city<- bind_rows(interpolated_value_Bus_splited, interpolated_value_HDV_splited, interpolated_value_PC_splited)
 emis_city$link_speed_av <- emis_city$link_speed_av*3.6 # Back to km/h, needed for non-exhaust
+
+emis_city$tsIni <- tsIni
 
 # Georeference
 # emis_city <- full_join(emis_city, roads, by = c("LinkID" = "id")) %>%
