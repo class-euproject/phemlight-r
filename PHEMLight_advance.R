@@ -23,7 +23,7 @@ drive_cycle_data_path <- args[2]
 output_file <- args[3]
 
 # Configuration Data ------------------------------------------------------
-general_path <- "/home/esabate/pollutionMap/phemlight-r/"
+general_path <- "/home/elli/phemlight/"
 input_path <- paste0(general_path, "in/")
 drive_cycle_data_path <- paste0(input_path, args[2])
 # file_roads <- "shapefile of the road network, if emissions need to be georeferenciated"
@@ -31,20 +31,24 @@ drive_cycle_data_path <- paste0(input_path, args[2])
 #print(drive_cycle_data_path)
 drive_cycle_data <- drive_cycle_data_path
 output_path <- paste0(general_path, "out/")
+
 # file_resuspension_ef <- "resuspension emission factors" # <- You will not use it
+
+# Caracteristicas técnicas medias de cada tipo de vehiculo (instituto soft oficial)
 path_vehicles <- paste0(input_path, "V4_no_elect/")
+# Composición vehicular (script de tipologia copert a comp. vehicular/tipologia phemlight)
 fleetShare_data <- paste0(input_path, "fleetshare.csv")
 
-# Aggregated False : Individual vehicle emissions calculation: g/veh/h
-# Aggregated True: Vehicle emissions aggregated per vehicle group and time-step: g/h
+# Aggregated False : Individual vehicle emissions calculation: g/veh/h, but later are aggregated by LinkID
+# Aggregated True: Vehicle emissions usando flujo * vel_media de un grupo de coches en un intervalo: g/h
 aggregated <- F
-non_exhaust <- F
+non_exhaust <- F # emisiones que no son de tubo de escape # es un extra que convendría para partículas
 intervals <- T
 interval_time <- 3600 # seconds
-ta = 10 #Temp. Ambiente
-ltrip <- 6.47 # Average distance in Barcelona [km] (obs. mobilitat 2013)
+ta = 10 #Temp. Ambiente # NO SE USA
+ltrip <- 6.47 # Average distance in Barcelona [km] (obs. mobilitat 2013) # NO SE USA
 
-#--
+# Calibración a mano de Dani y que resultados encajen
 tunning_idle <- 1.1 # No tocar (!!)
 tunning_critP <- 1.15 # No tocar (!!)
 tunning_VSP <-0.9 # No tocar (!!)
@@ -54,35 +58,36 @@ tunning_VSP <-0.9 # No tocar (!!)
 
 
 ############### ============== EMISSION FACTORS ============== ###############
-
+# ojo a shapefiles de openstreetmaps. Dani linkaba estos datos con linkId - usaba la misma referencia - 
 # roads <- sf::read_sf(file_roads)
 # roads <- subset(roads, select = c("id", "name"))
 
 
 ## Lists of files needed ##
 files_emissions <- list.files(path_vehicles)
+# Dani leia diferentes inputs de datos tecnicos de flotas
 files_emissions <- files_emissions[!grepl("*FC.csv|*.veh|^Fleet", files_emissions)]
 header<- def_header(paste0(path_vehicles, files_emissions[1]))
 tot_emissions_EF <- ldply(files_emissions, read_csv_emissions)
 
-## Drive cyle data ##
+## Drive cyle data - - Dani usaba datos por segundo
 drive_cycles_ss <- read_csv(drive_cycle_data)
 drive_cycles_ss$Av_link_speed <- drive_cycles_ss$Av_link_speed/3.6 # To m/s
 drive_cycles_ss$Vehicle_type<- as.factor(drive_cycles_ss$Vehicle_type)
 drive_cycles_ss <- arrange(drive_cycles_ss, LinkID, Vehicle_type)
 drive_cycles_ss <- mutate(drive_cycles_ss, acc = ifelse(lead(Time) - Time != 1, 0, ((lead(Av_link_speed) - Av_link_speed)/(lead(Time) - Time)))) # Acceleration, when time gap between vehicles, acc = 0
 
-## Fleetshares ##
+## Fleetshares ## Cuanto tienes de cada tipo vehiculo
 fleetshare<- read.csv(fleetShare_data, skip = 2, col.names = c("veh_group", "veh_category", "share"))
 fleetshare$veh_category<- as.character(fleetshare$veh_category)
 
-## Vehicle Data ##
+## Vehicle Data ## Archvios datos tecnicos de tipo coches
 files_vehicles <- list.files(path_vehicles)
 files_vehicles <- files_vehicles[grepl("*.veh", files_vehicles)]
 tot_vehicles_data <- llply(files_vehicles, read_veh_data)
 names(tot_vehicles_data)<- c(files_vehicles)
 
-## Prated/Pcritical
+## Prated/Pcritical# calculo potencia critica
 veh_critial_power<- ldply(files_emissions, read_critical_power)
 veh_critial_power$source <- sub(".csv", "", veh_critial_power$source)
 criticP_share<- left_join(veh_critial_power, fleetshare, by = c("source" = "veh_category"))
@@ -91,17 +96,17 @@ avg_critic_P<- ddply(criticP_share, ~veh_group, summarise, sum_avg_critP = sum(a
 avg_critic_P[c(1,2), 2] <- avg_critic_P[c(1,2), 2]*tunning_critP # Desfase de Pcrit respecto a la original
 
 
-## Idle
+## Idle # Calculo valores contaminacion punto muerto
 idle <- ldply(files_emissions, read_idle)
 idle <- calc_idles(idle, fleetshare)
 idle[1,2:7] <- idle[1,2:7]*tunning_idle #Desfase de idle respecto al original
 
-## Mileage correction factor (aging)
+## Mileage correction factor (aging) # correccion kiometraje
 mcor_nox<- mileage_factor_calc(paste0(input_path, "aging/mcorr_nox.csv"))
 mcor_co<- mileage_factor_calc(paste0(input_path, "aging/mcorr_co.csv"))
 mcor_vox<- mileage_factor_calc(paste0(input_path, "aging/mcorr_voc.csv"))
 
-## Power and pollutant product with fleet shares ###
+## Power and pollutant product with fleetshares ###  g/km caract tecnica
 tot_emissions_EF$Source <- sub(".csv", "", tot_emissions_EF$Source)
 tot_emissions_EF <- left_join(tot_emissions_EF, fleetshare, by = c("Source" = "veh_category"))
 tot_emissions_EF <- transform(tot_emissions_EF,
@@ -146,11 +151,12 @@ P_HDV[,2:7] <- P_HDV[,2:7]*avg_critic_P[2,2]
 
 
 ############### ============== VSP FROM DRIVE CYCLES (normalised) ============== ###############
-
+# OJO aunque hasta el uso drive_cycles_ss parece fijo, hay llamadas a funciones que sí pueden estar utilizando datos del input de la camara
 # Lectura de todos los RMF
 rot_mass_factors<- ldply(files_vehicles, data_rot_mass_factor)
 names(rot_mass_factors)<- c("speed_m/s", "gear_ratio", "rot_mass_factor", "source")
 rot_mass_factors$`speed_m/s`<- rot_mass_factors$`speed_m/s`/3.6
+
 
 # Rot Mass factor optimisation
 #1
@@ -252,9 +258,12 @@ want = which(interpolated_value_PC$Av_link_speed < 17.5 & interpolated_value_PC$
 # If aggregated = False -> Each vehicle of the link it is considered. Passing from g/veh/h => g/veh/s
 # If aggregated = True -> Vehicles speed is averaged per time-step, then each time-step has to be multiplied per flow.
 #   This should be done when aggregated aimsun results per time-step. g/link/s
-interpolated_value_PC[,9:14]
-interpolated_value_PC$Flow
+print('-------- interpolated_value_PC valores iniciales')
+interpolated_value_PC
+
+# Ojo el input de Dani si tiene un campo de flujo. Count de vehiculos en un intervalo de tiempo. No sirve partiendo de datos instantaneos
 if(aggregated) {
+  # Dani tenía datos de Flow de otro fichero diferente al de los datos de coche,vel,etc
   interpolated_value_PC[,9:14] <- interpolated_value_PC[,9:14]*interpolated_value_PC$Flow/3600
   interpolated_value_Bus[,10:15] <- interpolated_value_Bus[,10:15]*interpolated_value_Bus$Flow/3600
   interpolated_value_HDV[,9:14] <- interpolated_value_HDV[,9:14]*interpolated_value_HDV$Flow/3600
@@ -275,12 +284,13 @@ if(aggregated) {
 }
 byCol = c("LinkID")
 
+# 
 if (intervals) {
     interpolated_value_PC$int <- as.integer(interpolated_value_PC$Time/interval_time)
     interpolated_value_HDV$int <- as.integer(interpolated_value_HDV$Time/interval_time)
     interpolated_value_Bus$int <- as.integer(interpolated_value_Bus$Time/interval_time)
     
-    interpolated_value_PC$Hr <- as.integer(interpolated_value_PC$Time/3600.1)
+    interpolated_value_PC$Hr <- as.integer(interpolated_value_PC$Time/3600.1) # ojo a que si ponemos 3600 puede petar
     interpolated_value_HDV$Hr <- as.integer(interpolated_value_HDV$Time/3600.1)
     interpolated_value_Bus$Hr <- as.integer(interpolated_value_Bus$Time/3600.1)
     options(dplyr.summarise.inform = FALSE)
@@ -294,6 +304,11 @@ if (intervals) {
                 PN = sum(PN, na.rm = T)*3600/interval_time,
                 NO = sum(NO, na.rm = T)*3600/interval_time)
     interpolated_value_PC_splited$veh_group<- "car"
+    print('-----------PC')
+    print(interpolated_value_PC)
+    print('-----------PC_splitted')
+    print(interpolated_value_PC_splited)
+    print(interpolated_value_PC_splited[VehID=='20936_6'])
     interpolated_value_HDV_splited <- interpolated_value_HDV %>%
       group_by_at(c(byCol, 'int', 'Hr')) %>%
       summarise(link_speed_av = mean(Av_link_speed),
@@ -338,7 +353,8 @@ if (intervals) {
                  PN = sum(PN, na.rm = T),
                  NO = sum(NO, na.rm = T))
     interpolated_value_PC_splited$veh_group<- "car"
-
+    print('------ PC_splitted after mean' )
+    interpolated_value_PC_splited
   # interpolated_value_HDV_splited <- ddply(interpolated_value_HDV, ~LinkID, summarise, 
   #                                         link_speed_av = mean(Av_link_speed),
   #                                         lat = lat[length(lat)],
@@ -388,6 +404,7 @@ rm(criticP_share, avg_critic_P, drive_cycles_ss, drive_cycles_ss_dt_bus, drive_c
    sum_veh_specific_var, tot_emissions_EF, veh_critial_power, interpolated_value_Bus,
    interpolated_value_HDV, interpolated_value_PC)
 
+# OJO --TODO: en lugar de juntar datos podriamos sumarlos
 emis_city<- bind_rows(interpolated_value_Bus_splited, interpolated_value_HDV_splited, interpolated_value_PC_splited)
 emis_city$link_speed_av <- emis_city$link_speed_av*3.6 # Back to km/h, needed for non-exhaust
 
