@@ -175,6 +175,7 @@ sum_veh_specific_var<- calc_sum_specific_var(tot_vehicles_data, fleetshare)
 
 
 # Calculo VSPs
+drive_cycles_ss$Time <- as.integer(drive_cycles_ss$Time/1000)
 drive_cycles_ss_dt_car <- data.table(filter(drive_cycles_ss, Vehicle_type == "Car"))
 drive_cycles_ss_dt_car[,rot_mass_f:= (calc_rot_mass_factor(max_car, Av_link_speed))]
 drive_cycles_ss_dt_car[, avg_VSP:= (calc_power_PC(Av_link_speed, acc, rot_mass_f))]
